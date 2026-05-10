@@ -23,32 +23,48 @@
 		angle: number;
 	}
 
-	// Deterministic radial layout: root at center, discovered states on a ring.
-	// Ordering is by severity so high-impact states land on top, keeping layout
-	// spatially stable across re-renders. No simulation, no tick loop.
+	// Concentric radial layout: base at center, depth-1 states on the inner
+	// ring, depth-2 on the next ring, etc. Within each ring, states are
+	// sorted by severity (worst first) so high-impact states land on top and
+	// the layout stays spatially stable across re-renders.
 	const layout = $derived.by(() => {
 		const rootIdx = graph.states.findIndex((s) => s.id === graph.rootId);
 		const root = rootIdx >= 0 ? graph.states[rootIdx] : graph.states[0];
 		if (!root) return { root: null as Positioned | null, ring: [] as Positioned[] };
 		const others = graph.states.filter((s) => s.id !== root.id);
-		others.sort((a, b) => {
-			const d = b.result.summary.fail - a.result.summary.fail;
-			if (d !== 0) return d;
+		const byDepth = new Map<number, InteractionState[]>();
+		for (const s of others) {
+			const d = Math.max(1, s.depth);
+			const arr = byDepth.get(d) ?? [];
+			arr.push(s);
+			byDepth.set(d, arr);
+		}
+		const sortFn = (a: InteractionState, b: InteractionState) => {
+			const f = b.result.summary.fail - a.result.summary.fail;
+			if (f !== 0) return f;
 			const w = b.result.summary.warning - a.result.summary.warning;
 			if (w !== 0) return w;
 			return a.discoveredAt.localeCompare(b.discoveredAt);
-		});
-		const radius = Math.min(width, height) * 0.36;
+		};
+		const maxDepth = Math.max(0, ...byDepth.keys());
 		const rootPos: Positioned = { state: root, x: cx, y: cy, angle: 0 };
-		const ring: Positioned[] = others.map((s, i) => {
-			const angle = (i / Math.max(1, others.length)) * Math.PI * 2 - Math.PI / 2;
-			return {
-				state: s,
-				x: cx + Math.cos(angle) * radius,
-				y: cy + Math.sin(angle) * radius,
-				angle
-			};
-		});
+		const ring: Positioned[] = [];
+		const baseRadius = Math.min(width, height) * 0.22;
+		const ringStep = Math.min(width, height) * 0.16;
+		for (let d = 1; d <= maxDepth; d++) {
+			const list = (byDepth.get(d) ?? []).slice().sort(sortFn);
+			if (list.length === 0) continue;
+			const radius = baseRadius + ringStep * (d - 1);
+			for (let i = 0; i < list.length; i++) {
+				const angle = (i / list.length) * Math.PI * 2 - Math.PI / 2;
+				ring.push({
+					state: list[i],
+					x: cx + Math.cos(angle) * radius,
+					y: cy + Math.sin(angle) * radius,
+					angle
+				});
+			}
+		}
 		return { root: rootPos, ring };
 	});
 
@@ -108,8 +124,11 @@
 		style="border-color: var(--panel-border); color: var(--panel-text-muted);"
 	>
 		<span>State graph</span>
-		<span class="tabular-nums normal-case text-[10px]" style:color="var(--panel-text-muted)">
-			{graph.states.length} state{graph.states.length === 1 ? '' : 's'} · {graph.transitions.length} transition{graph.transitions.length === 1 ? '' : 's'}
+		<span class="text-[10px] normal-case tabular-nums" style:color="var(--panel-text-muted)">
+			{graph.states.length} state{graph.states.length === 1 ? '' : 's'} · {graph.transitions.length} transition{graph
+				.transitions.length === 1
+				? ''
+				: 's'}
 		</span>
 	</div>
 	<svg
@@ -138,13 +157,13 @@
 			</radialGradient>
 		</defs>
 
-		<rect x="0" y="0" width={width} height={height} fill="url(#state-bg)" />
+		<rect x="0" y="0" {width} {height} fill="url(#state-bg)" />
 
 		{#if layout.root}
 			{#each [0.36, 0.18] as rf (rf)}
 				<circle
-					cx={cx}
-					cy={cy}
+					{cx}
+					{cy}
 					r={Math.min(width, height) * rf}
 					fill="none"
 					stroke="var(--panel-border)"
@@ -181,7 +200,8 @@
 				<g
 					role="button"
 					tabindex="0"
-					aria-label="State {p.state.id}: {p.state.triggerLabel} — {p.state.result.summary.fail} failures, {p.state.result.summary.warning} warnings"
+					aria-label="State {p.state.id}: {p.state.triggerLabel} — {p.state.result.summary
+						.fail} failures, {p.state.result.summary.warning} warnings"
 					aria-pressed={isSel}
 					onclick={() => onselect(p.state.id)}
 					onkeydown={(e) => handleKey(e, p.state.id)}
@@ -199,18 +219,12 @@
 					<circle
 						cx={p.x}
 						cy={p.y}
-						r={r}
+						{r}
 						fill="var(--panel-bg-elevated)"
 						stroke={severityColor(p.state)}
 						stroke-width={isSel ? 3 : 2}
 					/>
-					<circle
-						cx={p.x}
-						cy={p.y}
-						r={r - 4}
-						fill={severityColor(p.state)}
-						opacity="0.22"
-					/>
+					<circle cx={p.x} cy={p.y} r={r - 4} fill={severityColor(p.state)} opacity="0.22" />
 					<text
 						x={p.x}
 						y={p.y + 4}
@@ -242,15 +256,20 @@
 		style="border-color: var(--panel-border);"
 	>
 		<span class="flex items-center gap-1">
-			<span class="inline-block h-2 w-2 rounded-full" style="background-color: var(--viz-node-ok);"></span>
+			<span class="inline-block h-2 w-2 rounded-full" style="background-color: var(--viz-node-ok);"
+			></span>
 			clean
 		</span>
 		<span class="flex items-center gap-1">
-			<span class="inline-block h-2 w-2 rounded-full" style="background-color: var(--viz-node-warn);"></span>
+			<span
+				class="inline-block h-2 w-2 rounded-full"
+				style="background-color: var(--viz-node-warn);"
+			></span>
 			warnings
 		</span>
 		<span class="flex items-center gap-1">
-			<span class="inline-block h-2 w-2 rounded-full" style="background-color: var(--viz-node-bad);"></span>
+			<span class="inline-block h-2 w-2 rounded-full" style="background-color: var(--viz-node-bad);"
+			></span>
 			failures
 		</span>
 		<span class="ml-auto">★ base · number = fail count</span>

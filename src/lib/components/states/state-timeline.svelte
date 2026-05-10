@@ -34,7 +34,11 @@
 
 	function formatTime(iso: string): string {
 		try {
-			return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+			return new Date(iso).toLocaleTimeString([], {
+				hour: '2-digit',
+				minute: '2-digit',
+				second: '2-digit'
+			});
 		} catch {
 			return '';
 		}
@@ -50,7 +54,7 @@
 		style="border-color: var(--panel-border); color: var(--panel-text-muted);"
 	>
 		<span>Discovery timeline</span>
-		<span class="normal-case text-[10px]" style:color="var(--panel-text-muted)">
+		<span class="text-[10px] normal-case" style:color="var(--panel-text-muted)">
 			chronological · click to inspect
 		</span>
 	</div>
@@ -59,20 +63,14 @@
 			{@const d = delta(state)}
 			{@const isRoot = state.id === graph.rootId}
 			{@const isSel = selectedId === state.id}
-			<li
-				class="group relative border-b last:border-b-0"
-				style:border-color="var(--panel-border)"
-			>
+			<li class="group relative border-b last:border-b-0" style:border-color="var(--panel-border)">
 				<button
 					type="button"
 					onclick={() => onselect(state.id)}
 					class="flex w-full items-start gap-3 px-3 py-2 text-left transition-colors hover:bg-[var(--panel-hover)]"
 					style:background-color={isSel ? 'var(--panel-selected)' : 'transparent'}
 				>
-					<div
-						class="flex shrink-0 flex-col items-center"
-						aria-hidden="true"
-					>
+					<div class="flex shrink-0 flex-col items-center" aria-hidden="true">
 						<span
 							class="flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold"
 							style:color="var(--viz-surface)"
@@ -115,10 +113,18 @@
 							<span
 								class="rounded px-1 font-mono text-[9px]"
 								style="background-color: var(--panel-code-bg); color: var(--panel-text);"
-							>{state.id}</span>
+								>{state.id}</span
+							>
 							<span class="truncate text-[11px] font-semibold text-[var(--panel-text)]">
 								{isRoot ? 'Base state' : state.triggerLabel}
 							</span>
+							{#if !isRoot && state.outcome}
+								<span
+									class="shrink-0 rounded px-1 font-mono text-[9px]"
+									style="background-color: color-mix(in srgb, var(--viz-info) 14%, transparent); color: var(--viz-info);"
+									title="Discovery outcome">{state.outcome}</span
+								>
+							{/if}
 							<span class="ml-auto shrink-0 font-mono text-[9px] text-[var(--panel-text-subtle)]">
 								{formatTime(state.discoveredAt)}
 							</span>
@@ -139,15 +145,15 @@
 									<span
 										class="rounded px-1 tabular-nums"
 										style="background-color: color-mix(in srgb, var(--viz-bad) 14%, transparent); color: var(--viz-bad);"
-										title="Issues that only appear in this state"
-									>+{d.added} new</span>
+										title="Issues that only appear in this state">+{d.added} new</span
+									>
 								{/if}
 								{#if d.removed > 0}
 									<span
 										class="rounded px-1 tabular-nums"
 										style="background-color: color-mix(in srgb, var(--viz-ok) 14%, transparent); color: var(--viz-ok);"
-										title="Base issues that vanish in this state"
-									>−{d.removed}</span>
+										title="Base issues that vanish in this state">−{d.removed}</span
+									>
 								{/if}
 								{#if d.added === 0 && d.removed === 0}
 									<span class="text-[var(--panel-text-subtle)]">same as base</span>

@@ -51,7 +51,49 @@
 			case 'tab-break': return 'Keyboard tab order disagrees with the visual reading order.';
 			case 'tab-unreachable': return 'Element looks interactive but cannot be reached by keyboard.';
 			case 'positive-tabindex': return 'Positive tabindex forces this element out of natural sequence.';
+			case 'skip-link': return 'Skip link — intentionally early in tab order, off-screen until focused.';
+			case 'sticky-pinned': return 'Pinned by position: sticky/fixed — visual rank diverges from DOM by design.';
+			case 'roving-group': return 'Inside a roving-tabindex widget — only the active item is in the tab sequence.';
+			case 'modal-context': return 'Outside the active modal — focus is restricted to the dialog subtree.';
+			case 'inert-subtree': return 'Inside an inert subtree — excluded from focus and drift analysis.';
+			case 'decorative-hidden': return 'Decorative icon inside an interactive parent — correctly hidden from AX.';
 		}
+	});
+
+	const layout = $derived(entry?.layout ?? null);
+	const layoutNotes = $derived.by(() => {
+		if (!layout) return [] as string[];
+		const notes: string[] = [];
+		if (layout.position === 'sticky' || layout.position === 'fixed') {
+			notes.push(`position: ${layout.position} — visually pinned regardless of DOM position.`);
+		}
+		if (layout.offscreen) {
+			notes.push('Visually offscreen (sr-only / clipped). Common for skip links.');
+		}
+		if (layout.inertAncestor) {
+			notes.push('Ancestor has inert — excluded from focus and AX.');
+		}
+		if (layout.ariaHiddenSelf) {
+			notes.push('aria-hidden=true on self or ancestor — invisible to assistive tech.');
+		}
+		if (layout.dialogContext === 'modal') {
+			notes.push('Inside the active modal dialog (focus trap).');
+		} else if (layout.dialogContext === 'open') {
+			notes.push('Inside an open non-modal dialog.');
+		}
+		if (layout.rovingGroupRole) {
+			notes.push(`Inside role="${layout.rovingGroupRole}" — roving tabindex pattern.`);
+		}
+		if (layout.multiColumnAncestor) {
+			notes.push('Inside a multi-column container — visual order is column-major.');
+		}
+		if (layout.skipLinkCandidate) {
+			notes.push('Looks like a skip link (anchor href="#…", offscreen).');
+		}
+		if (layout.decorativeCandidate) {
+			notes.push('Small icon inside an interactive parent — likely decorative.');
+		}
+		return notes;
 	});
 
 	/**
@@ -153,6 +195,28 @@
 					</dd>
 				</dl>
 			</section>
+
+			{#if layoutNotes.length > 0}
+				<section class="mb-3">
+					<h3 class="mb-1 text-[9px] font-bold tracking-wide text-[var(--panel-text-muted)] uppercase">
+						Layout context
+					</h3>
+					<ul
+						class="space-y-0.5 rounded-md border px-2 py-1.5 text-[10px]"
+						style="border-color: var(--panel-border); background-color: var(--panel-bg);"
+					>
+						{#each layoutNotes as note (note)}
+							<li
+								class="flex gap-1.5 leading-snug"
+								style:color="var(--panel-text-muted)"
+							>
+								<span aria-hidden="true" style:color="var(--viz-muted)">·</span>
+								<span>{note}</span>
+							</li>
+						{/each}
+					</ul>
+				</section>
+			{/if}
 
 			<section class="mb-3">
 				<h3 class="mb-1 text-[9px] font-bold tracking-wide text-[var(--panel-text-muted)] uppercase">

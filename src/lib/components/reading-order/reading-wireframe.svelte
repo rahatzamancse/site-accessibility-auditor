@@ -27,8 +27,8 @@
 
 	let container = $state<HTMLDivElement | null>(null);
 	let svgEl = $state<SVGSVGElement | null>(null);
-	let width = $state(400);
-	let height = $state(400);
+	let width = $state(0);
+	let height = $state(0);
 	let hoveredKey = $state<string | null>(null);
 	let hoverPos = $state({ x: 0, y: 0 });
 	let panning = $state(false);
@@ -43,6 +43,12 @@
 
 	let viewBox = $state<Box>({ x: 0, y: 0, w: 1280, h: 800 });
 	let animHandle: number | null = null;
+	// Tracks whether we have a real container size yet. Until ResizeObserver
+	// reports a non-zero size, fit attempts (e.g. from $effect on remount) are
+	// deferred — otherwise we lock in a bad viewBox computed from a 0×0
+	// container before layout completes, which is what broke the wireframe
+	// after re-scans.
+	let initialFitDone = false;
 
 	onMount(() => {
 		if (!container) return;
@@ -51,6 +57,12 @@
 				width = e.contentRect.width;
 				height = Math.max(220, e.contentRect.height);
 			}
+			if (!initialFitDone && width > 0 && height > 0) {
+				initialFitDone = true;
+				fitToVisible();
+			} else {
+				reshapeViewBoxToAspect();
+			}
 		});
 		ro.observe(container);
 		return () => {
@@ -58,6 +70,51 @@
 			if (animHandle !== null) cancelAnimationFrame(animHandle);
 		};
 	});
+
+	/**
+	 * Pad a box outward so its aspect ratio matches the container. Without this,
+	 * `preserveAspectRatio="meet"` letter-boxes a tall page into a thin vertical
+	 * strip whenever the panel is narrow, which makes the wireframe unreadable.
+	 */
+	function expandToContainerAspect(box: Box): Box {
+		// Prefer ResizeObserver-reported size (always reflects the post-layout
+		// content box) over container.clientWidth, which can be 0 during the
+		// post-mount $effect tick before layout has run.
+		const w = width > 0 ? width : container?.clientWidth ?? 0;
+		const h = height > 0 ? height : container?.clientHeight ?? 0;
+		if (w <= 0 || h <= 0 || box.w <= 0 || box.h <= 0) return box;
+		const containerAspect = w / h;
+		const boxAspect = box.w / box.h;
+		if (boxAspect > containerAspect) {
+			const newH = box.w / containerAspect;
+			return { x: box.x, y: box.y - (newH - box.h) / 2, w: box.w, h: newH };
+		}
+		const newW = box.h * containerAspect;
+		return { x: box.x - (newW - box.w) / 2, y: box.y, w: newW, h: box.h };
+	}
+
+	/**
+	 * Reshape the live viewBox to match the container aspect, preserving its
+	 * center. Called when the panel resizes so previously-fit content keeps
+	 * filling the dominant axis instead of collapsing into a sliver.
+	 */
+	function reshapeViewBoxToAspect() {
+		if (width <= 0 || height <= 0) return;
+		if (viewBox.w <= 0 || viewBox.h <= 0) return;
+		const containerAspect = width / height;
+		const vbAspect = viewBox.w / viewBox.h;
+		if (Math.abs(vbAspect - containerAspect) < 1e-3) return;
+		const cx = viewBox.x + viewBox.w / 2;
+		const cy = viewBox.y + viewBox.h / 2;
+		let newW = viewBox.w;
+		let newH = viewBox.h;
+		if (vbAspect > containerAspect) {
+			newH = newW / containerAspect;
+		} else {
+			newW = newH * containerAspect;
+		}
+		viewBox = { x: cx - newW / 2, y: cy - newH / 2, w: newW, h: newH };
+	}
 
 	interface Cell {
 		key: string;
@@ -194,7 +251,7 @@
 		const visible = cells.filter((c) => nodeMatches(c.pair));
 		const source = visible.length > 0 ? visible : cells;
 		if (source.length === 0) {
-			animateTo(fullBounds);
+			animateTo(expandToContainerAspect(fullBounds));
 			return;
 		}
 		let minX = Infinity;
@@ -208,16 +265,18 @@
 			if (c.y + c.h > maxY) maxY = c.y + c.h;
 		}
 		animateTo(
-			padBox(
-				{ x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) },
-				0.04,
-				8
+			expandToContainerAspect(
+				padBox(
+					{ x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) },
+					0.04,
+					8
+				)
 			)
 		);
 	}
 
 	function fitToActualBounds() {
-		animateTo(fullBounds);
+		animateTo(expandToContainerAspect(fullBounds));
 	}
 
 	function fitToSelection() {
@@ -225,12 +284,14 @@
 		const sel = cells.find((c) => c.key === selectedKey);
 		if (!sel) return;
 		const padding = Math.max(sel.w, sel.h, 120);
-		animateTo({
-			x: sel.x - padding,
-			y: sel.y - padding,
-			w: sel.w + padding * 2,
-			h: sel.h + padding * 2
-		});
+		animateTo(
+			expandToContainerAspect({
+				x: sel.x - padding,
+				y: sel.y - padding,
+				w: sel.w + padding * 2,
+				h: sel.h + padding * 2
+			})
+		);
 	}
 
 	$effect(() => {
@@ -238,6 +299,10 @@
 		void forest;
 		void filter;
 		void query;
+		// Skip until ResizeObserver has reported a real container size, so we
+		// don't fit against a 0-width box during the post-remount tick. The RO
+		// callback runs the deferred fit once layout settles.
+		if (!initialFitDone) return;
 		untrack(() => {
 			fitToVisible();
 		});
@@ -246,12 +311,48 @@
 	$effect(() => {
 		void selectedKey;
 		if (!followSelection) return;
+		if (!initialFitDone) return;
 		untrack(() => {
 			fitToSelection();
 		});
 	});
 
-	const stroke1 = $derived(Math.max(fullBounds.w, fullBounds.h) / 400);
+	// SVG-units-per-CSS-pixel at the current zoom. Used to size tab-path badges
+	// in screen space so they stay readable but never balloon over the layout.
+	const svgPerPx = $derived(width > 0 && viewBox.w > 0 ? viewBox.w / width : 1);
+	// Constant on-screen badge radius in SVG units (≈ 11 CSS px at any zoom).
+	const tabBadgeR = $derived(11 * svgPerPx);
+	const tabBadgeFont = $derived(11 * svgPerPx);
+
+	// Show/hide tab-path badges by *visual density*, not zoom level. For each
+	// badge we find its nearest neighbor (in CSS px at the current zoom)
+	// across all badges — not just tab-order-adjacent ones, since one tight
+	// pair would otherwise drag the whole wireframe into hide-mode. Average
+	// those distances; if it clears the threshold the badges aren't crowding
+	// each other and we render them. Lines stay visible at all zooms.
+	const BADGE_MIN_AVG_NEAREST_PX = 26;
+	const tabBadgeAvgNearestPx = $derived.by(() => {
+		if (tabPath.length < 2 || width <= 0 || viewBox.w <= 0) return Infinity;
+		const cssPerSvg = width / viewBox.w;
+		const centers = tabPath.map((c) => {
+			const r = c.pair.entry.rect;
+			return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+		});
+		let sum = 0;
+		for (let i = 0; i < centers.length; i++) {
+			let nearest = Infinity;
+			for (let j = 0; j < centers.length; j++) {
+				if (i === j) continue;
+				const dx = centers[i].x - centers[j].x;
+				const dy = centers[i].y - centers[j].y;
+				const d = Math.sqrt(dx * dx + dy * dy);
+				if (d < nearest) nearest = d;
+			}
+			sum += nearest;
+		}
+		return (sum / centers.length) * cssPerSvg;
+	});
+	const showBadges = $derived(tabBadgeAvgNearestPx >= BADGE_MIN_AVG_NEAREST_PX);
 
 	const zoomLevel = $derived.by(() => {
 		if (fullBounds.w <= 0 || viewBox.w <= 0) return 1;
@@ -409,7 +510,8 @@
 				height={fullBounds.h}
 				fill="transparent"
 				stroke="var(--viz-grid)"
-				stroke-width={stroke1 * 2}
+				stroke-width="1.5"
+				vector-effect="non-scaling-stroke"
 			/>
 
 			{#each sortedCells as cell (cell.key)}
@@ -456,7 +558,13 @@
 			{/each}
 
 			{#if showTabPath && tabPath.length > 1}
-				<g fill="none" stroke="var(--viz-accent)" stroke-dasharray="8 5" opacity="0.6">
+				<g
+					fill="none"
+					stroke="var(--viz-accent)"
+					stroke-dasharray="6 4"
+					opacity="0.6"
+					vector-effect="non-scaling-stroke"
+				>
 					{#each tabPath as cell, i (cell.key)}
 						{#if i < tabPath.length - 1}
 							{@const next = tabPath[i + 1]}
@@ -469,36 +577,37 @@
 								y1={cy1}
 								x2={cx2}
 								y2={cy2}
-								stroke-width={stroke1 * 2}
+								stroke-width="1.5"
 								vector-effect="non-scaling-stroke"
 							/>
 						{/if}
 					{/each}
 				</g>
-				<g>
+				<g class="tab-badges" class:hidden={!showBadges} aria-hidden={!showBadges}>
 					{#each tabPath as cell, i (cell.key)}
 						{@const cx = cell.pair.entry.rect.x + cell.pair.entry.rect.width / 2}
 						{@const cy = cell.pair.entry.rect.y + cell.pair.entry.rect.height / 2}
-						{@const r = Math.max(8, Math.min(18, Math.min(cell.w, cell.h) / 2.2))}
-						<circle
-							{cx}
-							{cy}
-							{r}
-							fill="var(--viz-accent)"
-							stroke="white"
-							stroke-width={stroke1}
-							vector-effect="non-scaling-stroke"
-							opacity="0.95"
-						/>
-						<text
-							x={cx}
-							y={cy + r / 3}
-							font-size={r}
-							font-family="ui-monospace, monospace"
-							font-weight="700"
-							fill="white"
-							text-anchor="middle">{i + 1}</text
-						>
+						<g class="tab-badge">
+							<circle
+								{cx}
+								{cy}
+								r={tabBadgeR}
+								fill="var(--viz-accent)"
+								stroke="white"
+								stroke-width="1"
+								vector-effect="non-scaling-stroke"
+								opacity="0.95"
+							/>
+							<text
+								x={cx}
+								y={cy + tabBadgeFont / 3}
+								font-size={tabBadgeFont}
+								font-family="ui-monospace, monospace"
+								font-weight="700"
+								fill="white"
+								text-anchor="middle">{i + 1}</text
+							>
+						</g>
 					{/each}
 				</g>
 			{/if}
@@ -544,3 +653,26 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	/* Tab-path numbered badges fade and shrink toward each badge's own
+	   center when adjacent centers fall below ~26 CSS px apart at the
+	   current zoom — the circles would otherwise overlap and clutter the
+	   wireframe. Lines stay visible. */
+	.tab-badges.hidden {
+		pointer-events: none;
+	}
+	.tab-badge {
+		opacity: 1;
+		transform: scale(1);
+		transform-box: fill-box;
+		transform-origin: center;
+		transition:
+			opacity 220ms ease-out,
+			transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+	.tab-badges.hidden .tab-badge {
+		opacity: 0;
+		transform: scale(0.35);
+	}
+</style>

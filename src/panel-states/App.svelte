@@ -16,11 +16,47 @@
 	let graph = $state<StateGraph | null>(null);
 	let running = $state(false);
 	let error = $state<string | null>(null);
-	let budget = $state(6);
+	let budget = $state(8);
+	let maxDepth = $state(2);
+	let safeMode = $state(false);
 	let selectedId = $state<string | null>(null);
 	let progress = $state<ExplorerProgress | null>(null);
 	let view = $state<ViewMode>('graph');
 	let controller: AbortController | null = null;
+
+	const outcomeCounts = $derived.by(() => {
+		const counts: Record<string, number> = {};
+		if (!graph) return counts;
+		for (const a of graph.attempts) counts[a.outcome] = (counts[a.outcome] ?? 0) + 1;
+		return counts;
+	});
+
+	const outcomeOrder = [
+		'new-state',
+		'duplicate',
+		'rolled-back',
+		'navigated',
+		'navigated-cross-origin',
+		'selector-stale',
+		'click-failed',
+		'timeout',
+		'error'
+	] as const;
+
+	function outcomeColor(o: string): string {
+		switch (o) {
+			case 'new-state':
+				return 'var(--viz-ok)';
+			case 'duplicate':
+			case 'rolled-back':
+				return 'var(--viz-info)';
+			case 'navigated':
+			case 'navigated-cross-origin':
+				return 'var(--viz-warn)';
+			default:
+				return 'var(--viz-bad)';
+		}
+	}
 
 	const debt = $derived(graph ? computeStateDebt(graph) : null);
 
@@ -35,7 +71,9 @@
 	);
 
 	const progressPct = $derived(
-		progress ? Math.round((progress.candidatesProcessed / Math.max(1, progress.candidatesTotal)) * 100) : 0
+		progress
+			? Math.round((progress.candidatesProcessed / Math.max(1, progress.candidatesTotal)) * 100)
+			: 0
 	);
 
 	async function handleRun() {
@@ -47,6 +85,8 @@
 		try {
 			const result = await exploreStates({
 				budget,
+				maxDepth,
+				safeMode,
 				signal: controller.signal,
 				onProgress: (p) => (progress = p)
 			});
@@ -83,13 +123,43 @@
 			<input
 				type="range"
 				min="2"
-				max="16"
+				max="24"
 				bind:value={budget}
 				class="w-24"
 				disabled={running}
-				aria-label="Exploration budget (candidate interactions)"
+				aria-label="Exploration budget (total candidate interactions across all depths)"
 			/>
 			<span class="w-6 text-right font-mono text-[var(--panel-text)]">{budget}</span>
+		</label>
+		<label
+			class="flex items-center gap-1.5 text-[11px] text-[var(--panel-text-muted)]"
+			title="Maximum BFS depth from base. Each additional depth replays the path via a base reload, so deeper levels are slower."
+		>
+			<span>Depth</span>
+			<select
+				bind:value={maxDepth}
+				disabled={running}
+				class="rounded border bg-[var(--panel-bg-elevated)] px-1 py-0.5 text-[11px] text-[var(--panel-text)]"
+				style:border-color="var(--panel-border)"
+				aria-label="Max BFS depth from base"
+			>
+				<option value={1}>1</option>
+				<option value={2}>2</option>
+				<option value={3}>3</option>
+				<option value={4}>4</option>
+			</select>
+		</label>
+		<label
+			class="flex items-center gap-1 text-[11px] text-[var(--panel-text-muted)]"
+			title="Skip dialog openers, generic buttons, and any anchor that looks like navigation. Useful for production sites where exploration must not click anything destructive."
+		>
+			<input
+				type="checkbox"
+				bind:checked={safeMode}
+				disabled={running}
+				aria-label="Safe mode: skip risky candidates"
+			/>
+			<span>Safe mode</span>
 		</label>
 		{#if running}
 			<ToolbarButton onclick={handleStop}>Stop</ToolbarButton>
@@ -108,7 +178,7 @@
 				style="border-color: var(--panel-border); background-color: var(--panel-summary-bg);"
 			>
 				<div class="flex items-center justify-between">
-					<span class="font-semibold capitalize text-[var(--panel-text)]">{progress.phase}</span>
+					<span class="font-semibold text-[var(--panel-text)] capitalize">{progress.phase}</span>
 					<span class="font-mono text-[var(--panel-text-muted)]"
 						>{progress.candidatesProcessed}/{progress.candidatesTotal} · {progressPct}%</span
 					>
@@ -142,6 +212,47 @@
 
 		{#if graph && debt}
 			<DebtCard {debt} />
+
+			{#if graph.attempts.length > 0 || graph.skipped.length > 0}
+				<div
+					class="rounded-md border px-3 py-2 text-[11px]"
+					style="border-color: var(--panel-border); background-color: var(--panel-bg-elevated);"
+				>
+					<div
+						class="flex items-center justify-between text-[9px] font-bold tracking-wide uppercase"
+						style:color="var(--panel-text-muted)"
+					>
+						<span>Coverage report</span>
+						<span class="normal-case"
+							>{graph.attempts.length} attempt{graph.attempts.length === 1 ? '' : 's'}</span
+						>
+					</div>
+					{#if graph.attempts.length > 0}
+						<div class="mt-1.5 flex flex-wrap gap-1">
+							{#each outcomeOrder as o (o)}
+								{#if outcomeCounts[o]}
+									<span
+										class="rounded px-1.5 py-0.5 font-mono text-[10px]"
+										style:background-color="color-mix(in srgb, {outcomeColor(o)} 14%, transparent)"
+										style:color={outcomeColor(o)}
+										title="{o} candidates"
+									>
+										{o} · {outcomeCounts[o]}
+									</span>
+								{/if}
+							{/each}
+						</div>
+					{/if}
+					{#if graph.skipped.length > 0}
+						<div class="mt-1.5 text-[10px] text-[var(--panel-text-muted)]">
+							Skipped: {#each graph.skipped as s, i (s.kind + i)}{i > 0 ? ' · ' : ''}<span
+									class="font-mono">{s.kind} ({s.count})</span
+								>
+								{s.reason}{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
 
 			<div
 				class="flex items-center gap-0.5 rounded-md border p-0.5 text-[10px]"
@@ -198,7 +309,7 @@
 		{:else if !running && !error}
 			<EmptyState
 				title="Dynamic state explorer"
-				description="Performs a bounded BFS over safe interactions (disclosures, tabs, dialogs, in-page links), screenshots each discovered state, and reruns the audit. Emits a state graph, a state-by-category issue matrix, and a state-conditional accessibility debt metric."
+				description="Performs a depth-bounded BFS over safe interactions (disclosures, tabs, dialogs, in-page links). At each frontier state the explorer collects fresh candidates, replays the path from base via a hard reload to reach deeper states, screenshots each discovered state, and reruns the audit. Emits a state graph, a state-by-category issue matrix, and a state-conditional accessibility debt metric."
 				action="Tune the budget slider, then click <strong>Explore States</strong>."
 			>
 				<div class="mt-5 grid w-full max-w-md grid-cols-2 gap-2 text-left text-[11px]">
@@ -231,7 +342,9 @@
 						<div class="text-[9px] font-bold tracking-wide text-[var(--viz-warn)] uppercase">
 							Issue matrix
 						</div>
-						<p class="mt-1 text-[var(--panel-text-muted)]">state × category heatmap with Δ vs base</p>
+						<p class="mt-1 text-[var(--panel-text-muted)]">
+							state × category heatmap with Δ vs base
+						</p>
 					</div>
 					<div
 						class="rounded-md border p-2"

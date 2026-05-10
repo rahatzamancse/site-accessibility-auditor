@@ -91,11 +91,11 @@ for (var i = 0; i < all.length; i++) {
   var el = all[i];
   var cs = window.getComputedStyle(el);
   if ((cs.position === 'fixed' || cs.position === 'sticky') && cs.visibility !== 'hidden' && cs.display !== 'none') {
-    var r = el.getBoundingClientRect();
+    var r = __audit_rect(el);
     if (r.width > 0 && r.height > 0) {
       stickyOverlays.push({
         el: el,
-        rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+        rect: r,
         position: cs.position,
         pointerEvents: cs.pointerEvents,
         zIndex: parseInt(cs.zIndex, 10) || 0

@@ -40,6 +40,45 @@ function classifyKind(entry: ReadingEntry): DiffKind {
 	return 'match';
 }
 
+/**
+ * Reclassify a bug-tier kind into an info-tier kind when layout signals
+ * show the finding is actually intentional. Precedence (highest first):
+ * inert-subtree > modal-context > skip-link > sticky-pinned >
+ * roving-group > decorative-hidden. Anything not matched is returned
+ * unchanged.
+ */
+function reclassify(entry: ReadingEntry, kind: DiffKind, hasActiveModal: boolean): DiffKind {
+	const L = entry.layout;
+	if (L.inertAncestor) return 'inert-subtree';
+	if (hasActiveModal && L.dialogContext !== 'modal') return 'modal-context';
+	if (L.skipLinkCandidate && (kind === 'tab-break' || kind === 'order-drift' || kind === 'match')) {
+		return 'skip-link';
+	}
+	if ((L.position === 'sticky' || L.position === 'fixed') &&
+		(kind === 'order-drift' || kind === 'tab-break')) {
+		return 'sticky-pinned';
+	}
+	if (L.rovingGroupRole && kind === 'tab-unreachable') {
+		return 'roving-group';
+	}
+	if (L.decorativeCandidate && kind === 'missing-in-ax') {
+		return 'decorative-hidden';
+	}
+	return kind;
+}
+
+/**
+ * An entry is excluded from rank/mismatch math when it is inert, or
+ * outside an active modal. Those entries still appear in the diff with
+ * their info-tier kind, but their rank disagreements are not counted as
+ * "drift" because the page deliberately silences them.
+ */
+function isExcluded(entry: ReadingEntry, hasActiveModal: boolean): boolean {
+	if (entry.layout.inertAncestor) return true;
+	if (hasActiveModal && entry.layout.dialogContext !== 'modal') return true;
+	return false;
+}
+
 function countMismatches(a: Map<string, number>, b: Map<string, number>): number {
 	let c = 0;
 	a.forEach((ai, key) => {
@@ -53,31 +92,44 @@ export function diffReadingOrder(entries: ReadingEntry[]): ReadingOrderDiff {
 	const pairs: DiffPair[] = [];
 	const pairsByKey = new Map<string, DiffPair>();
 
-	// Tab break detection: reorder tabbables by visual index; any position
-	// where the rank disagrees with its tabIndex is a break. We overlay
-	// this onto the base classification so a tab-break trumps match.
-	const tabEntries = entries.filter((e) => e.tabIndex !== null);
+	const hasActiveModal = entries.some((e) => e.layout?.dialogContext === 'modal');
+	const inScope = (e: ReadingEntry) => !isExcluded(e, hasActiveModal);
+
+	// Tab break detection: reorder tabbables (in-scope only) by visual
+	// index; any position where the rank disagrees with its tabIndex is a
+	// break. Skip links are exempted in reclassify; sticky/fixed are
+	// downgraded to sticky-pinned there too.
+	const tabEntries = entries.filter((e) => e.tabIndex !== null && inScope(e));
 	const visualRank = tabEntries
 		.slice()
 		.sort((a, b) => a.visualIndex - b.visualIndex)
 		.reduce((acc, e, i) => acc.set(e.key, i), new Map<string, number>());
+	const tabbableScopeRank = tabEntries
+		.slice()
+		.sort((a, b) => (a.tabIndex ?? 0) - (b.tabIndex ?? 0))
+		.reduce((acc, e, i) => acc.set(e.key, i), new Map<string, number>());
 	const tabBreaks = new Set<string>();
 	for (const e of tabEntries) {
 		const vr = visualRank.get(e.key);
-		if (vr !== undefined && vr !== e.tabIndex) tabBreaks.add(e.key);
+		const tr = tabbableScopeRank.get(e.key);
+		if (vr !== undefined && tr !== undefined && vr !== tr) tabBreaks.add(e.key);
 	}
 
-	// Order drift: visual-vs-DOM drift on AX-visible entries. Keeps the
-	// semantics of the old tree-differ for tree/wireframe highlighting.
-	const axByKey = entries.filter((e) => e.axIndex !== null);
+	// Order drift: visual-vs-AX drift on AX-visible entries (in-scope).
+	const axByKey = entries.filter((e) => e.axIndex !== null && inScope(e));
 	const visualOfAx = axByKey
 		.slice()
 		.sort((a, b) => a.visualIndex - b.visualIndex)
 		.reduce((acc, e, i) => acc.set(e.key, i), new Map<string, number>());
+	const axRankInScope = axByKey
+		.slice()
+		.sort((a, b) => (a.axIndex ?? 0) - (b.axIndex ?? 0))
+		.reduce((acc, e, i) => acc.set(e.key, i), new Map<string, number>());
 	const orderDrift = new Set<string>();
 	for (const e of axByKey) {
 		const expected = visualOfAx.get(e.key);
-		if (expected !== undefined && expected !== e.axIndex) orderDrift.add(e.key);
+		const got = axRankInScope.get(e.key);
+		if (expected !== undefined && got !== undefined && expected !== got) orderDrift.add(e.key);
 	}
 
 	for (const entry of entries) {
@@ -87,6 +139,8 @@ export function diffReadingOrder(entries: ReadingEntry[]): ReadingOrderDiff {
 			if (tabBreaks.has(entry.key)) kind = 'tab-break';
 			else if (orderDrift.has(entry.key)) kind = 'order-drift';
 		}
+		// Layout-aware downgrade.
+		kind = reclassify(entry, kind, hasActiveModal);
 		const pair: DiffPair = {
 			kind,
 			entry,
@@ -108,74 +162,52 @@ export function diffReadingOrder(entries: ReadingEntry[]): ReadingOrderDiff {
 		'order-drift': 0,
 		'tab-break': 0,
 		'tab-unreachable': 0,
-		'positive-tabindex': 0
+		'positive-tabindex': 0,
+		'skip-link': 0,
+		'sticky-pinned': 0,
+		'roving-group': 0,
+		'modal-context': 0,
+		'inert-subtree': 0,
+		'decorative-hidden': 0
 	};
 	for (const p of pairs) summary[p.kind]++;
 
-	// Pairwise mismatches:
-	//  - domVsVisual / axVsVisual consider every entry that has both indices.
-	//  - domVsTab / visualVsTab consider tabbables; "position" is the entry's
-	//    rank among tabbables under each order.
-	const allDom = new Map<string, number>();
-	const allVisual = new Map<string, number>();
-	entries.forEach((e) => {
-		allDom.set(e.key, e.domIndex);
-		allVisual.set(e.key, e.visualIndex);
-	});
+	// Pairwise mismatch counters operate on in-scope entries only so that
+	// inert subtrees and modal-suppressed regions do not inflate drift.
+	const scoped = entries.filter(inScope);
+
 	const domVsVisualRanked = (() => {
-		const keys = entries.slice().sort((a, b) => a.domIndex - b.domIndex);
 		const dRank = new Map<string, number>();
 		const vRank = new Map<string, number>();
-		keys.forEach((e, i) => dRank.set(e.key, i));
-		keys
-			.slice()
-			.sort((a, b) => a.visualIndex - b.visualIndex)
-			.forEach((e, i) => vRank.set(e.key, i));
+		scoped.slice().sort((a, b) => a.domIndex - b.domIndex).forEach((e, i) => dRank.set(e.key, i));
+		scoped.slice().sort((a, b) => a.visualIndex - b.visualIndex).forEach((e, i) => vRank.set(e.key, i));
 		return countMismatches(dRank, vRank);
 	})();
 
 	const axVsVisualRanked = (() => {
-		const axOnly = entries.filter((e) => e.axIndex !== null);
+		const axOnly = scoped.filter((e) => e.axIndex !== null);
 		const aRank = new Map<string, number>();
 		const vRank = new Map<string, number>();
-		axOnly
-			.slice()
-			.sort((a, b) => (a.axIndex ?? 0) - (b.axIndex ?? 0))
-			.forEach((e, i) => aRank.set(e.key, i));
-		axOnly
-			.slice()
-			.sort((a, b) => a.visualIndex - b.visualIndex)
-			.forEach((e, i) => vRank.set(e.key, i));
+		axOnly.slice().sort((a, b) => (a.axIndex ?? 0) - (b.axIndex ?? 0)).forEach((e, i) => aRank.set(e.key, i));
+		axOnly.slice().sort((a, b) => a.visualIndex - b.visualIndex).forEach((e, i) => vRank.set(e.key, i));
 		return countMismatches(aRank, vRank);
 	})();
 
 	const tabVsDomRanked = (() => {
-		const tabOnly = entries.filter((e) => e.tabIndex !== null);
+		const tabOnly = scoped.filter((e) => e.tabIndex !== null);
 		const tRank = new Map<string, number>();
 		const dRank = new Map<string, number>();
-		tabOnly
-			.slice()
-			.sort((a, b) => (a.tabIndex ?? 0) - (b.tabIndex ?? 0))
-			.forEach((e, i) => tRank.set(e.key, i));
-		tabOnly
-			.slice()
-			.sort((a, b) => a.domIndex - b.domIndex)
-			.forEach((e, i) => dRank.set(e.key, i));
+		tabOnly.slice().sort((a, b) => (a.tabIndex ?? 0) - (b.tabIndex ?? 0)).forEach((e, i) => tRank.set(e.key, i));
+		tabOnly.slice().sort((a, b) => a.domIndex - b.domIndex).forEach((e, i) => dRank.set(e.key, i));
 		return countMismatches(tRank, dRank);
 	})();
 
 	const tabVsVisualRanked = (() => {
-		const tabOnly = entries.filter((e) => e.tabIndex !== null);
+		const tabOnly = scoped.filter((e) => e.tabIndex !== null);
 		const tRank = new Map<string, number>();
 		const vRank = new Map<string, number>();
-		tabOnly
-			.slice()
-			.sort((a, b) => (a.tabIndex ?? 0) - (b.tabIndex ?? 0))
-			.forEach((e, i) => tRank.set(e.key, i));
-		tabOnly
-			.slice()
-			.sort((a, b) => a.visualIndex - b.visualIndex)
-			.forEach((e, i) => vRank.set(e.key, i));
+		tabOnly.slice().sort((a, b) => (a.tabIndex ?? 0) - (b.tabIndex ?? 0)).forEach((e, i) => tRank.set(e.key, i));
+		tabOnly.slice().sort((a, b) => a.visualIndex - b.visualIndex).forEach((e, i) => vRank.set(e.key, i));
 		return countMismatches(tRank, vRank);
 	})();
 

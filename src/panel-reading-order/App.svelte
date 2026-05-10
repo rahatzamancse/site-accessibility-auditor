@@ -40,6 +40,7 @@
 	let fitVersion = $state(0);
 	let overlayMode = $state<OverlayMode>('tab');
 	let showTabPath = $state(true);
+	let showHints = $state(true);
 	let ribbonCollapsed = $state(false);
 	let annotationColor = $state('#2563eb');
 	let recalcTimer: ReturnType<typeof setInterval> | null = null;
@@ -219,6 +220,20 @@
 			>
 				Tab path
 			</button>
+			<button
+				type="button"
+				onclick={() => (showHints = !showHints)}
+				class="rounded-md border px-2 py-0.5 text-[11px] transition-colors"
+				style:border-color={showHints ? 'var(--panel-primary)' : 'var(--panel-border)'}
+				style:background-color={showHints
+					? 'color-mix(in srgb, var(--panel-primary) 14%, var(--panel-bg-elevated))'
+					: 'var(--panel-bg-elevated)'}
+				style:color={showHints ? 'var(--panel-primary)' : 'var(--panel-text-muted)'}
+				aria-pressed={showHints}
+				title="Show recognised intentional patterns (skip links, sticky elements, roving tabindex, modals, inert, decorative icons) as info chips"
+			>
+				Hints
+			</button>
 		{/if}
 		<label
 			class="flex items-center gap-1.5 text-xs"
@@ -260,6 +275,7 @@
 					{filter}
 					{query}
 					{followSelection}
+					{showHints}
 					onfilterchange={handleFilterChange}
 					onquerychange={handleQueryChange}
 					onfollowchange={(next) => (followSelection = next)}

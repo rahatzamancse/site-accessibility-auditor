@@ -1,5 +1,6 @@
 <script lang="ts">
-	import type { ReadingOrderDiff } from '../../reading-order/types.ts';
+	import type { DiffKind, ReadingOrderDiff } from '../../reading-order/types.ts';
+	import { INFO_KINDS } from '../../reading-order/types.ts';
 
 	interface Props {
 		diff: ReadingOrderDiff;
@@ -59,8 +60,22 @@
 	function ribbonColor(kind: string, a: number, b: number): string {
 		if (kind === 'tab-break') return 'var(--viz-bad)';
 		if (kind === 'positive-tabindex') return 'var(--viz-warn)';
+		if (INFO_KINDS.has(kind as DiffKind)) return 'var(--viz-muted)';
 		if (a === b) return 'var(--viz-link)';
 		return 'color-mix(in srgb, var(--viz-accent) 55%, transparent)';
+	}
+
+	/**
+	 * Info-tier ribbons render dashed + reduced opacity so they read as
+	 * "explanation, not problem" against the solid bug-tier ribbons.
+	 */
+	function ribbonDash(kind: string): string | null {
+		return INFO_KINDS.has(kind as DiffKind) ? '4 3' : null;
+	}
+	function ribbonOpacity(kind: string, isActive: boolean): number {
+		if (isActive) return 1;
+		if (INFO_KINDS.has(kind as DiffKind)) return 0.45;
+		return 0.7;
 	}
 
 	function truncate(s: string, n: number): string {
@@ -125,6 +140,20 @@
 					><line x1="1" y1="3" x2="17" y2="3" stroke="var(--viz-warn)" stroke-width="2" /></svg
 				>
 				positive tabindex
+			</span>
+			<span class="flex items-center gap-1" style:color="var(--panel-text-muted)">
+				<svg width="18" height="6" aria-hidden="true"
+					><line
+						x1="1"
+						y1="3"
+						x2="17"
+						y2="3"
+						stroke="var(--viz-muted)"
+						stroke-width="2"
+						stroke-dasharray="4 3"
+					/></svg
+				>
+				hint (intentional pattern)
 			</span>
 		</div>
 	</div>
@@ -194,14 +223,16 @@
 								fill="none"
 								stroke={ribbonColor(pair.kind, dI, vI)}
 								stroke-width={isActive ? 3.5 : 1.5}
-								opacity={isActive ? 1 : 0.7}
+								stroke-dasharray={ribbonDash(pair.kind) ?? 'none'}
+								opacity={ribbonOpacity(pair.kind, isActive)}
 							/>
 							<path
 								d={ribbonPath(xVis + 4, yV, xTab - 4, yT)}
 								fill="none"
 								stroke={ribbonColor(pair.kind, vI, tI)}
 								stroke-width={isActive ? 3.5 : 1.5}
-								opacity={isActive ? 1 : 0.7}
+								stroke-dasharray={ribbonDash(pair.kind) ?? 'none'}
+								opacity={ribbonOpacity(pair.kind, isActive)}
 							/>
 						</g>
 						{#each [0, 1, 2] as col (col)}

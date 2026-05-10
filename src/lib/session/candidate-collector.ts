@@ -1,40 +1,61 @@
-import { evalInPage } from '../shared/devtools-eval.ts';
+import { evalInPage, type EvalOptions } from '../shared/devtools-eval.ts';
 import type { CandidateKind, InteractionCandidate } from './types.ts';
 
 interface RawCandidate {
 	kind: CandidateKind;
 	selector: string;
 	label: string;
+	key: string;
 	rect: { x: number; y: number; width: number; height: number };
+	likelyNavigates: boolean;
 }
 
-export async function collectCandidates(max = 24): Promise<InteractionCandidate[]> {
+export interface CollectOptions extends EvalOptions {
+	max?: number;
+	/**
+	 * Drop candidates whose activation is likely to navigate or open a modal
+	 * we cannot reliably close (`button`, `dialog-opener`, anchors that look
+	 * navigation-y). Used by the panel "safe mode" toggle for production sites.
+	 */
+	safeMode?: boolean;
+}
+
+export interface CollectResult {
+	candidates: InteractionCandidate[];
+	skippedShadow: number;
+	skippedIframe: number;
+	skippedDisabled: number;
+	skippedNavigation: number;
+}
+
+const DESTRUCTIVE_LABEL = String.raw`delete|remove|destroy|clear|reset|cancel|discard|sign\s*out|log\s*out|logout|buy|purchase|submit|send|post|publish|pay|checkout|confirm|proceed|yes|ok|continue|leave|exit`;
+
+/**
+ * Walk the live DOM and collect a bounded list of safe interactions to try.
+ * Pierces open shadow roots, skips disabled / hidden / cross-origin / target=_blank
+ * candidates, and tags each picked element with `data-aud-id="<id>"` so the
+ * explorer can re-resolve it at click time even after a re-render.
+ */
+export async function collectCandidates(options: CollectOptions = {}): Promise<CollectResult> {
+	const max = options.max ?? 24;
+	const safeMode = options.safeMode === true;
 	const expr = `(function() {
 		var MAX = ${max};
-		var seen = new Set();
+		var SAFE = ${safeMode ? 'true' : 'false'};
+		var DESTRUCTIVE = new RegExp('${DESTRUCTIVE_LABEL}', 'i');
+		var seen = new WeakSet();
 		var out = [];
+		var keyCounts = Object.create(null);
+		var skipped = { shadow: 0, iframe: 0, disabled: 0, navigation: 0 };
 
-		function pathSelector(el) {
-			if (el.id && /^[a-zA-Z][\\w-]*$/.test(el.id)) return '#' + el.id;
-			var parts = [];
-			var c = el;
-			while (c && c !== document.body && parts.length < 6) {
-				var tag = c.tagName.toLowerCase();
-				var nth = 1, sib = c;
-				while ((sib = sib.previousElementSibling)) { if (sib.tagName === c.tagName) nth++; }
-				var seg = tag + ':nth-of-type(' + nth + ')';
-				if (c.id && /^[a-zA-Z][\\w-]*$/.test(c.id)) seg = tag + '#' + c.id;
-				parts.unshift(seg);
-				c = c.parentElement;
-			}
-			return parts.join(' > ');
-		}
+		// Clean previous tags so re-runs don't accumulate stale attributes.
+		document.querySelectorAll('[data-aud-id]').forEach(function(n){ n.removeAttribute('data-aud-id'); });
 
 		function visibleRect(el) {
 			var r = el.getBoundingClientRect();
 			if (r.width <= 0 || r.height <= 0) return null;
 			var s = window.getComputedStyle(el);
-			if (s.visibility === 'hidden' || s.display === 'none') return null;
+			if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity || '1') === 0) return null;
 			return r;
 		}
 
@@ -47,71 +68,161 @@ export async function collectCandidates(max = 24): Promise<InteractionCandidate[
 			return t.replace(/\\s+/g, ' ').slice(0, 80);
 		}
 
+		function isDisabled(el) {
+			if (el.disabled === true) return true;
+			if (el.getAttribute('aria-disabled') === 'true') return true;
+			return false;
+		}
+
+		function isInIframe(el) {
+			return el.ownerDocument !== document;
+		}
+
+		function looksNavigation(el) {
+			if (el.tagName === 'A') {
+				var href = el.getAttribute('href') || '';
+				if (el.target === '_blank' || el.getAttribute('target') === '_blank') return true;
+				if (!href || href === '#') return true;
+				if (href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) return true;
+				if (el.hasAttribute('download')) return true;
+				if (href.indexOf('://') !== -1) {
+					try {
+						var u = new URL(href, location.href);
+						if (u.origin !== location.origin) return true;
+					} catch (e) { return true; }
+				}
+				if (!href.startsWith('#')) {
+					// Same-origin path/route: SPA may swap the document; treat as nav.
+					return true;
+				}
+				return false;
+			}
+			return false;
+		}
+
 		function consider(el, kind) {
+			if (out.length >= MAX) return;
 			if (seen.has(el)) return;
 			seen.add(el);
-			if (out.length >= MAX) return;
+			if (isInIframe(el)) { skipped.iframe++; return; }
+			if (isDisabled(el)) { skipped.disabled++; return; }
 			var r = visibleRect(el);
 			if (!r) return;
-
-			// destructive filters
 			if (el.tagName === 'BUTTON' || el.tagName === 'INPUT') {
 				var type = (el.getAttribute('type') || '').toLowerCase();
 				if (type === 'submit' || type === 'reset') return;
 			}
-			if (el.tagName === 'A') {
-				var href = el.getAttribute('href') || '';
-				if (!href || href.startsWith('http') && !href.startsWith(location.origin)) return;
-				if (el.getAttribute('download') !== null) return;
-				if (href.startsWith('mailto:') || href.startsWith('tel:')) return;
+			var nav = looksNavigation(el);
+			if (nav) {
+				if (kind === 'in-page-link') {
+					// in-page-link only collects href^="#" — nav check there means
+					// empty/javascript/external href (still skip).
+					skipped.navigation++;
+					return;
+				}
+				if (SAFE) { skipped.navigation++; return; }
 			}
-			var lbl = label(el);
-			if (!lbl) lbl = '(' + kind + ')';
-
-			out.push({
-				kind: kind,
-				selector: pathSelector(el),
-				label: lbl,
-				rect: { x: r.x, y: r.y, width: r.width, height: r.height }
-			});
+			if (kind === 'button') {
+				if (SAFE) { skipped.navigation++; return; }
+				var lbl = (el.innerText || '').toLowerCase();
+				if (DESTRUCTIVE.test(lbl)) return;
+			}
+			if (SAFE && kind === 'dialog-opener') {
+				skipped.navigation++;
+				return;
+			}
+			var lblText = label(el);
+			if (!lblText) lblText = '(' + kind + ')';
+			var id = out.length;
+			el.setAttribute('data-aud-id', String(id));
+			var sel = '[data-aud-id="' + id + '"]';
+			var keyBase = kind + '|' + lblText;
+			var nth = keyCounts[keyBase] || 0;
+			keyCounts[keyBase] = nth + 1;
+			var stableKey = keyBase + '#' + nth;
+			out.push({ kind: kind, selector: sel, label: lblText, key: stableKey, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, likelyNavigates: !!nav });
 		}
 
-		// Disclosures (aria-expanded)
-		var disclosures = document.querySelectorAll('[aria-expanded="false"]');
-		for (var i = 0; i < disclosures.length; i++) consider(disclosures[i], 'disclosure');
-
-		// Summary
-		var summaries = document.querySelectorAll('details:not([open]) > summary');
-		for (var j = 0; j < summaries.length; j++) consider(summaries[j], 'summary');
-
-		// Tab widgets
-		var tabs = document.querySelectorAll('[role="tab"][aria-selected="false"]');
-		for (var k = 0; k < tabs.length; k++) consider(tabs[k], 'tab');
-
-		// Dialog openers: buttons with data-dialog, aria-haspopup="dialog", or matching text
-		var dialogOpeners = document.querySelectorAll('[aria-haspopup="dialog"], [data-toggle="modal"], [data-dialog]');
-		for (var d = 0; d < dialogOpeners.length; d++) consider(dialogOpeners[d], 'dialog-opener');
-
-		// Menu openers
-		var menuOpeners = document.querySelectorAll('[aria-haspopup="menu"], [aria-haspopup="true"][aria-expanded="false"]');
-		for (var m = 0; m < menuOpeners.length; m++) consider(menuOpeners[m], 'menu-opener');
-
-		// In-page hash links
-		var hashLinks = document.querySelectorAll('a[href^="#"]');
-		for (var h = 0; h < hashLinks.length; h++) consider(hashLinks[h], 'in-page-link');
-
-		// Buttons as last resort (non-destructive labels)
-		if (out.length < MAX / 2) {
-			var buttons = document.querySelectorAll('button:not([type="submit"]):not([type="reset"])');
-			for (var b = 0; b < buttons.length && out.length < MAX; b++) {
-				var lbl = (buttons[b].innerText || '').toLowerCase();
-				if (/delete|remove|destroy|clear|reset|cancel|discard|sign\\s*out|logout|buy|purchase|submit/.test(lbl)) continue;
-				consider(buttons[b], 'button');
+		// Walk DOM + open shadow roots.
+		function walk(root) {
+			var stack = [root];
+			while (stack.length) {
+				if (out.length >= MAX) return;
+				var node = stack.pop();
+				if (!node) continue;
+				if (node.shadowRoot) {
+					stack.push(node.shadowRoot);
+					skipped.shadow++; // count piercing — informational
+				}
+				var children = node.children;
+				if (children) {
+					for (var i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+				}
+				// classify by attribute / role
+				if (node.nodeType !== 1) continue;
+				var tag = node.tagName;
+				var role = node.getAttribute && node.getAttribute('role');
+				var ariaExpanded = node.getAttribute && node.getAttribute('aria-expanded');
+				var hasPopup = node.getAttribute && node.getAttribute('aria-haspopup');
+				if (tag === 'SUMMARY' && node.parentElement && node.parentElement.tagName === 'DETAILS' && !node.parentElement.open) {
+					consider(node, 'summary');
+					continue;
+				}
+				if (role === 'tab' && node.getAttribute('aria-selected') === 'false') {
+					consider(node, 'tab');
+					continue;
+				}
+				if (hasPopup === 'dialog' || (node.dataset && (node.dataset.toggle === 'modal' || 'dialog' in node.dataset))) {
+					consider(node, 'dialog-opener');
+					continue;
+				}
+				if (hasPopup === 'menu' || (hasPopup === 'true' && ariaExpanded === 'false')) {
+					consider(node, 'menu-opener');
+					continue;
+				}
+				if (ariaExpanded === 'false') {
+					consider(node, 'disclosure');
+					continue;
+				}
+				if (tag === 'A') {
+					var href = node.getAttribute('href') || '';
+					if (href.startsWith('#') && href.length > 1) {
+						consider(node, 'in-page-link');
+						continue;
+					}
+				}
 			}
 		}
+		walk(document.body || document.documentElement);
 
-		return out.slice(0, MAX);
+		// Buttons as a fallback only if we haven't filled half the budget yet.
+		if (out.length < Math.ceil(MAX / 2)) {
+			var btns = document.querySelectorAll('button:not([type="submit"]):not([type="reset"])');
+			for (var b = 0; b < btns.length && out.length < MAX; b++) consider(btns[b], 'button');
+		}
+
+		return { items: out.slice(0, MAX), skipped: skipped };
 	})()`;
-	const raw = await evalInPage<RawCandidate[]>(expr);
-	return raw.map((c, i) => ({ id: i, ...c }));
+	const raw = await evalInPage<{
+		items: RawCandidate[];
+		skipped: { shadow: number; iframe: number; disabled: number; navigation: number };
+	}>(expr, { signal: options.signal, timeoutMs: options.timeoutMs });
+	return {
+		candidates: raw.items.map((c, i) => ({ id: i, ...c })),
+		skippedShadow: raw.skipped.shadow,
+		skippedIframe: raw.skipped.iframe,
+		skippedDisabled: raw.skipped.disabled,
+		skippedNavigation: raw.skipped.navigation
+	};
+}
+
+export async function clearCandidateTags(options: EvalOptions = {}): Promise<void> {
+	try {
+		await evalInPage(
+			`(function(){ document.querySelectorAll('[data-aud-id]').forEach(function(n){ n.removeAttribute('data-aud-id'); }); return true; })()`,
+			options
+		);
+	} catch {
+		// best-effort cleanup
+	}
 }

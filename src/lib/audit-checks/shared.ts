@@ -66,7 +66,15 @@ function __audit_text(el) {
 }
 function __audit_rect(el) {
   var r = el.getBoundingClientRect();
-  return { x: r.x, y: r.y, width: r.width, height: r.height };
+  // Page-coord rect: viewport rect + current scroll. Lets the panel crop a
+  // stitched full-page screenshot and place the rect on the minimap without
+  // re-querying the page after the user has scrolled.
+  return {
+    x: r.x + (window.scrollX || window.pageXOffset || 0),
+    y: r.y + (window.scrollY || window.pageYOffset || 0),
+    width: r.width,
+    height: r.height
+  };
 }
 function __audit_visible(el) {
   var r = el.getBoundingClientRect();

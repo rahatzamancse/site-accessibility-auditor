@@ -59,6 +59,24 @@ export interface ReadingEntry {
 
 	rect: ReadingEntryRect;
 
+	/**
+	 * Layout / context signals used by the differ to recognise legitimate
+	 * patterns (skip links, modals, sticky elements, roving-tabindex
+	 * widgets, decorative icons, multi-column layouts, inert subtrees)
+	 * and downgrade their drift findings to informational hints.
+	 */
+	layout: {
+		position: 'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
+		offscreen: boolean;
+		inertAncestor: boolean;
+		ariaHiddenSelf: boolean;
+		dialogContext: 'modal' | 'open' | null;
+		rovingGroupRole: string | null;
+		multiColumnAncestor: boolean;
+		skipLinkCandidate: boolean;
+		decorativeCandidate: boolean;
+	};
+
 	/** Convenience flattened attributes used by labels and badges. */
 	attributes: Record<string, string | null>;
 }
@@ -79,6 +97,7 @@ export interface ReadingOrderSummary {
 	naturalTabs: number;
 	programmaticTabs: number;
 	hasPositiveTabindex: boolean;
+	hasActiveModal: boolean;
 }
 
 export interface ReadingOrderResult {
@@ -89,9 +108,11 @@ export interface ReadingOrderResult {
 }
 
 /**
- * Typed disagreements between orderings. `order-drift` captures visual
- * vs. DOM/AX drift (inherited from the old ax-tree differ); the three
- * keyboard-specific kinds are new.
+ * Typed disagreements between orderings.
+ *
+ * The first block is the "bug" tier — genuine accessibility findings.
+ * The second block is the "info" tier — recognised intentional patterns
+ * that would otherwise show up as drift but are actually correct.
  */
 export type DiffKind =
 	| 'match'
@@ -102,7 +123,24 @@ export type DiffKind =
 	| 'order-drift'
 	| 'tab-break'
 	| 'tab-unreachable'
-	| 'positive-tabindex';
+	| 'positive-tabindex'
+	// Info tier — pattern recognised, no fix needed.
+	| 'skip-link'
+	| 'sticky-pinned'
+	| 'roving-group'
+	| 'modal-context'
+	| 'inert-subtree'
+	| 'decorative-hidden';
+
+/** Set of info-tier kinds. Used by UI to render them with neutral styling. */
+export const INFO_KINDS = new Set<DiffKind>([
+	'skip-link',
+	'sticky-pinned',
+	'roving-group',
+	'modal-context',
+	'inert-subtree',
+	'decorative-hidden'
+]);
 
 export interface DiffPair {
 	kind: DiffKind;

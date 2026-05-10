@@ -47,7 +47,15 @@ const KIND_COLOR: Record<DiffKind, string> = {
 	'order-drift': 'var(--viz-accent)',
 	'tab-break': 'var(--viz-bad)',
 	'tab-unreachable': 'var(--viz-bad)',
-	'positive-tabindex': 'var(--viz-warn)'
+	'positive-tabindex': 'var(--viz-warn)',
+	// Info tier — single neutral color so they read as "recognised
+	// pattern" rather than another severity.
+	'skip-link': 'var(--viz-muted)',
+	'sticky-pinned': 'var(--viz-muted)',
+	'roving-group': 'var(--viz-muted)',
+	'modal-context': 'var(--viz-muted)',
+	'inert-subtree': 'var(--viz-muted)',
+	'decorative-hidden': 'var(--viz-muted)'
 };
 
 export function kindColor(kind: DiffKind | null | undefined): string {
@@ -64,7 +72,13 @@ const KIND_LABEL: Record<DiffKind, string> = {
 	'order-drift': 'order drift',
 	'tab-break': 'tab break',
 	'tab-unreachable': 'not keyboard reachable',
-	'positive-tabindex': 'positive tabindex'
+	'positive-tabindex': 'positive tabindex',
+	'skip-link': 'skip link',
+	'sticky-pinned': 'sticky / fixed',
+	'roving-group': 'roving tabindex',
+	'modal-context': 'outside modal',
+	'inert-subtree': 'inert',
+	'decorative-hidden': 'decorative'
 };
 
 export function kindLabel(kind: DiffKind): string {

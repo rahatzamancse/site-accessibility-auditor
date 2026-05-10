@@ -78,12 +78,15 @@ export interface AuditIssue {
 	status: AuditStatus;
 	tag: string;
 	text: string;
+	/** Element rect in page coordinates (scrollX/Y already added). */
 	rect: ElementRect | null;
 	selector?: string | null;
 	domPath?: string | null;
 	attributes: Record<string, string | null>;
 	evidence: Record<string, unknown>;
 	suggestion: string;
+	/** Cropped element thumbnail as a JPEG data URL (max ~96 px on the long side). */
+	thumb?: string | null;
 }
 
 export interface AuditSummary {
@@ -94,6 +97,11 @@ export interface AuditSummary {
 	exempt: number;
 }
 
+export interface PageBounds {
+	width: number;
+	height: number;
+}
+
 export interface AuditResult {
 	issues: AuditIssue[];
 	summary: AuditSummary;
@@ -101,6 +109,8 @@ export interface AuditResult {
 	timestamp: string;
 	origin: string;
 	url: string;
+	/** Full document scroll bounds at scan time. Drives the minimap viewBox. */
+	pageBounds: PageBounds;
 }
 
 export function emptySummary(): AuditSummary {

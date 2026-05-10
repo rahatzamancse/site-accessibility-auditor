@@ -52,6 +52,187 @@ function buildScanExpression(): string {
 		return true;
 	}
 
+	// Anything injected by this extension's own overlay (badge spans,
+	// recalc buttons, connector SVG) must be invisible to the scan, or
+	// repeated scans accumulate the recalc button into the tab order on
+	// every pass.
+	function isOverlayEl(el) {
+		if (!el || !el.closest) return false;
+		if (el.id === 'reading-order-overlay-container') return true;
+		if (el.id === 'reading-order-connectors') return true;
+		return !!el.closest('#reading-order-overlay-container');
+	}
+
+	// ---- Layout signal helpers ---------------------------------------
+	// All caches live on WeakMaps so repeated ancestor lookups stay O(1)
+	// amortised across the whole walk.
+	var ROVING_ROLES = { toolbar:1, menu:1, menubar:1, tablist:1, radiogroup:1, listbox:1, tree:1, grid:1 };
+	var rovingCache = new WeakMap();
+	function findRovingAncestor(el) {
+		if (!el) return null;
+		if (rovingCache.has(el)) return rovingCache.get(el);
+		var p = el.parentElement;
+		var r = null;
+		if (p) {
+			var pr = p.getAttribute && p.getAttribute('role');
+			if (pr && ROVING_ROLES[pr]) r = pr;
+			else r = findRovingAncestor(p);
+		}
+		rovingCache.set(el, r);
+		return r;
+	}
+
+	var inertCache = new WeakMap();
+	function findInertAncestor(el) {
+		if (!el) return false;
+		if (inertCache.has(el)) return inertCache.get(el);
+		var hit = false;
+		if (el.inert === true || (el.hasAttribute && el.hasAttribute('inert'))) hit = true;
+		else {
+			var p = el.parentElement;
+			hit = p ? findInertAncestor(p) : false;
+		}
+		inertCache.set(el, hit);
+		return hit;
+	}
+
+	var ariaHiddenCache = new WeakMap();
+	function findAriaHiddenAncestor(el) {
+		if (!el) return false;
+		if (ariaHiddenCache.has(el)) return ariaHiddenCache.get(el);
+		var hit = false;
+		if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') hit = true;
+		else {
+			var p = el.parentElement;
+			hit = p ? findAriaHiddenAncestor(p) : false;
+		}
+		ariaHiddenCache.set(el, hit);
+		return hit;
+	}
+
+	// Multi-column ancestor: returns the ancestor element + column metrics
+	// (or null). Used both for layout.multiColumnAncestor flag and the
+	// column-major visual sort buckets.
+	var multiColCache = new WeakMap();
+	var multiColInfoCache = new WeakMap();
+	var multiColCounter = 0;
+	function multiColInfo(ancestor) {
+		if (multiColInfoCache.has(ancestor)) return multiColInfoCache.get(ancestor);
+		var s = window.getComputedStyle(ancestor);
+		var count = 1;
+		var cc = parseInt(s.columnCount, 10);
+		if (!isNaN(cc) && cc > 1) count = cc;
+		else if ((s.display === 'grid' || s.display === 'inline-grid') && s.gridTemplateColumns) {
+			var tracks = s.gridTemplateColumns.split(/\\s+/).filter(function(t){ return t && t !== 'none'; });
+			if (tracks.length >= 2) count = tracks.length;
+		}
+		var rect = ancestor.getBoundingClientRect();
+		var info = count > 1
+			? { id: 'mc' + (++multiColCounter), colWidth: rect.width / count, count: count, originX: rect.x }
+			: null;
+		multiColInfoCache.set(ancestor, info);
+		return info;
+	}
+	function findMultiColAncestor(el) {
+		if (!el) return null;
+		if (multiColCache.has(el)) return multiColCache.get(el);
+		var p = el.parentElement;
+		var hit = null;
+		if (p) {
+			var info = multiColInfo(p);
+			if (info) hit = { ancestor: p, info: info };
+			else hit = findMultiColAncestor(p);
+		}
+		multiColCache.set(el, hit);
+		return hit;
+	}
+
+	function isOffscreen(el, style) {
+		var r = el.getBoundingClientRect();
+		if (r.width <= 1 && r.height <= 1) return true;
+		if (style.position === 'absolute' || style.position === 'fixed') {
+			var l = parseFloat(style.left);
+			var t = parseFloat(style.top);
+			if (!isNaN(l) && l <= -9999) return true;
+			if (!isNaN(t) && t <= -9999) return true;
+		}
+		var cp = style.clipPath || '';
+		if (cp.indexOf('inset(50%)') !== -1 || cp.indexOf('inset(100%)') !== -1) return true;
+		var clip = style.clip || '';
+		if (/rect\\(\\s*0(?:px)?[\\s,]+0(?:px)?[\\s,]+0(?:px)?[\\s,]+0(?:px)?\\s*\\)/.test(clip)) return true;
+		var cls = (el.className && typeof el.className === 'string') ? el.className : '';
+		if (/\\bsr-only\\b|\\bvisually-hidden\\b|\\bvisuallyhidden\\b|\\bscreen-reader-only\\b/.test(cls)) return true;
+		return false;
+	}
+
+	function isSkipLink(el, offscreen) {
+		if (el.tagName.toLowerCase() !== 'a') return false;
+		var href = el.getAttribute('href');
+		if (!href || href.charAt(0) !== '#') return false;
+		if (offscreen) return true;
+		var cls = (el.className && typeof el.className === 'string') ? el.className : '';
+		return /\\bskip-link\\b|\\bskip-to-content\\b|\\bskipnav\\b/.test(cls);
+	}
+
+	function isDecorative(el, name, isInteractive) {
+		if (name) return false;
+		if (isInteractive) return false;
+		var tag = el.tagName.toLowerCase();
+		if (!/^(svg|img|i|span|use|path)$/.test(tag)) return false;
+		var r = el.getBoundingClientRect();
+		if (r.width > 32 || r.height > 32) return false;
+		var p = el.parentElement;
+		if (!p) return false;
+		var pTag = p.tagName.toLowerCase();
+		var pRole = p.getAttribute('role');
+		if (/^(button|a|summary)$/.test(pTag)) return true;
+		if (pRole === 'button' || pRole === 'link' || pRole === 'menuitem' || pRole === 'tab') return true;
+		return false;
+	}
+
+	// Locate the active modal once per scan. <dialog>:modal is the canonical
+	// signal; we fall back to the last open <dialog> and finally any visible
+	// [role="dialog"][aria-modal="true"] element.
+	function findActiveModal() {
+		var nativeOpen = document.querySelectorAll('dialog[open]');
+		for (var i = 0; i < nativeOpen.length; i++) {
+			try { if (nativeOpen[i].matches(':modal')) return nativeOpen[i]; } catch (e) {}
+		}
+		if (nativeOpen.length > 0) return nativeOpen[nativeOpen.length - 1];
+		var ariaModals = document.querySelectorAll('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]');
+		for (var j = ariaModals.length - 1; j >= 0; j--) {
+			var m = ariaModals[j];
+			var s = window.getComputedStyle(m);
+			if (s.display !== 'none' && s.visibility !== 'hidden') return m;
+		}
+		return null;
+	}
+	var ACTIVE_MODAL = findActiveModal();
+	function dialogContextOf(el) {
+		if (ACTIVE_MODAL && (el === ACTIVE_MODAL || ACTIVE_MODAL.contains(el))) return 'modal';
+		var anyDialog = el.closest && el.closest('dialog[open], [role="dialog"], [role="alertdialog"]');
+		return anyDialog ? 'open' : null;
+	}
+
+	function collectLayout(el, name, isInteractive) {
+		var s = window.getComputedStyle(el);
+		var pos = s.position || 'static';
+		var off = isOffscreen(el, s);
+		var mca = findMultiColAncestor(el);
+		return {
+			position: pos,
+			offscreen: off,
+			inertAncestor: findInertAncestor(el),
+			ariaHiddenSelf: findAriaHiddenAncestor(el),
+			dialogContext: dialogContextOf(el),
+			rovingGroupRole: findRovingAncestor(el),
+			multiColumnAncestor: !!mca,
+			skipLinkCandidate: isSkipLink(el, off),
+			decorativeCandidate: isDecorative(el, name, isInteractive),
+			_mca: mca // internal: passed to raw for column-major sort, dropped before serialization
+		};
+	}
+
 	function roleOf(el) {
 		var explicit = el.getAttribute('role');
 		if (explicit) return explicit;
@@ -153,6 +334,17 @@ function buildScanExpression(): string {
 		// domIdx suffix keeps keys unique even when the path truncation
 		// (max 10 ancestors) would otherwise collide on deep pages.
 		var entryKey = (path || '__body__') + '#' + domIdx;
+		var layout = collectLayout(el, name, isInteractive);
+		// Compute column bin for column-major visual sort within multi-column
+		// containers. Stored as raw fields, dropped from layout before return.
+		var visualGroup = null;
+		var visualBin = null;
+		if (layout._mca) {
+			visualGroup = layout._mca.info.id;
+			var relX = rect.x - layout._mca.info.originX;
+			visualBin = Math.max(0, Math.min(layout._mca.info.count - 1, Math.floor(relX / Math.max(1, layout._mca.info.colWidth))));
+		}
+		delete layout._mca;
 		var raw = {
 			key: entryKey,
 			path: path,
@@ -176,7 +368,10 @@ function buildScanExpression(): string {
 			attrHref: el.getAttribute('href'),
 			attrAriaLabel: el.getAttribute('aria-label'),
 			attrName: el.getAttribute('name'),
-			attrPlaceholder: el.getAttribute('placeholder')
+			attrPlaceholder: el.getAttribute('placeholder'),
+			layout: layout,
+			visualGroup: visualGroup,
+			visualBin: visualBin
 		};
 		raws.push(raw);
 		rawByElement.set(el, raw);
@@ -218,6 +413,7 @@ function buildScanExpression(): string {
 	}
 
 	function walk(el, level, parentInAx) {
+		if (isOverlayEl(el)) return;
 		if (!visible(el)) return;
 		var tag = el.tagName.toLowerCase();
 		var role = roleOf(el);
@@ -257,6 +453,7 @@ function buildScanExpression(): string {
 	for (var ti = 0; ti < allForTab.length; ti++) {
 		var tEl = allForTab[ti];
 		if (tabSeen.has(tEl)) continue;
+		if (isOverlayEl(tEl)) { tabSeen.add(tEl); continue; }
 		var tf = focusableOf(tEl);
 		if (tf.focusable === 'none') continue;
 		if (tf.rawTabindex !== null && tf.rawTabindex > 0) {
@@ -305,8 +502,20 @@ function buildScanExpression(): string {
 		documentHeight: Math.max(de.scrollHeight, de.clientHeight, document.body ? document.body.scrollHeight : 0)
 	};
 
-	return { raws: raws, tabKeys: tabKeys, viewport: viewport };
+	return { raws: raws, tabKeys: tabKeys, viewport: viewport, hasActiveModal: !!ACTIVE_MODAL };
 })()`;
+}
+
+interface RawLayout {
+	position: 'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
+	offscreen: boolean;
+	inertAncestor: boolean;
+	ariaHiddenSelf: boolean;
+	dialogContext: 'modal' | 'open' | null;
+	rovingGroupRole: string | null;
+	multiColumnAncestor: boolean;
+	skipLinkCandidate: boolean;
+	decorativeCandidate: boolean;
 }
 
 interface RawEntry {
@@ -333,9 +542,21 @@ interface RawEntry {
 	attrAriaLabel: string | null;
 	attrName: string | null;
 	attrPlaceholder: string | null;
+	layout: RawLayout;
+	visualGroup: string | null;
+	visualBin: number | null;
 }
 
 function compareVisual(a: RawEntry, b: RawEntry): number {
+	// Column-major within the same multi-column container (newspaper /
+	// CSS columns / multi-column grid). Entries outside multi-column
+	// containers use plain row-major reading order.
+	if (a.visualGroup && a.visualGroup === b.visualGroup) {
+		if (a.visualBin !== b.visualBin) {
+			return (a.visualBin ?? 0) - (b.visualBin ?? 0);
+		}
+		return a.rect.y - b.rect.y;
+	}
 	const rowTol = 20;
 	const aCy = a.rect.y + a.rect.height / 2;
 	const bCy = b.rect.y + b.rect.height / 2;
@@ -406,6 +627,7 @@ function toEntries(raws: RawEntry[], tabKeys: string[]): ReadingEntry[] {
 						}
 					: null,
 			rect: r.rect,
+			layout: r.layout,
 			attributes: {
 				id: r.attrId,
 				class: r.attrClass,
@@ -422,9 +644,12 @@ function toEntries(raws: RawEntry[], tabKeys: string[]): ReadingEntry[] {
 }
 
 export async function scanReadingOrder(): Promise<ReadingOrderResult> {
-	const raw = await evalInPage<{ raws: RawEntry[]; tabKeys: string[]; viewport: ViewportInfo }>(
-		buildScanExpression()
-	);
+	const raw = await evalInPage<{
+		raws: RawEntry[];
+		tabKeys: string[];
+		viewport: ViewportInfo;
+		hasActiveModal: boolean;
+	}>(buildScanExpression());
 	const entries = toEntries(raw.raws, raw.tabKeys);
 
 	const summary: ReadingOrderSummary = {
@@ -433,7 +658,10 @@ export async function scanReadingOrder(): Promise<ReadingOrderResult> {
 		tabCount: entries.filter((e) => e.tabIndex !== null).length,
 		naturalTabs: entries.filter((e) => e.tab?.focusable === 'natural').length,
 		programmaticTabs: entries.filter((e) => e.tab?.focusable === 'programmatic').length,
-		hasPositiveTabindex: entries.some((e) => e.tab?.tabindex !== null && (e.tab?.tabindex ?? 0) > 0)
+		hasPositiveTabindex: entries.some(
+			(e) => e.tab?.tabindex !== null && (e.tab?.tabindex ?? 0) > 0
+		),
+		hasActiveModal: raw.hasActiveModal
 	};
 
 	return {
@@ -507,15 +735,17 @@ function buildOverlayCSS(color: string): string {
   z-index: 99999 !important;
   overflow: visible !important;
 }
+/* Highlights deliberately omit z-index so the underlying page element
+   stays in its natural stacking order. Promoting the element here pushed
+   it above the overlay container (badges, connector lines, recalc
+   button), making the highlighted element pop out over the overlay. */
 .reading-order-hover-highlight {
   outline: 2px solid ${color} !important;
   outline-offset: 2px !important;
-  z-index: 100001 !important;
 }
 .reading-order-active-highlight {
   outline: 3px solid ${color} !important;
   outline-offset: 3px !important;
-  z-index: 100001 !important;
   animation: reading-order-pulse 0.5s ease-in-out 3 !important;
 }
 @keyframes reading-order-pulse {

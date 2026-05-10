@@ -38,6 +38,7 @@ import {
 	type FocusVisiblePageResult
 } from './audit-checks/focus-visible.ts';
 import { evalInPage, getPageInfo } from './shared/devtools-eval.ts';
+import { capturePage, cropToThumb, getPageBounds } from './shared/page-capture.ts';
 
 interface PageInfo {
 	origin: string;
@@ -70,6 +71,11 @@ const OVERLAY_CSS = `
   outline-offset: 1px !important;
 }
 [data-audit-id] { cursor: pointer !important; }
+[data-audit-hover="1"] {
+  outline-width: 3px !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.25) !important;
+}
 .audit-active-highlight {
   outline-width: 4px !important;
   outline-offset: 3px !important;
@@ -101,12 +107,55 @@ function buildRemoveOverlayExpression(): string {
     el.removeAttribute('data-audit-id');
     el.removeAttribute('data-audit-status');
     el.removeAttribute('data-audit-wcag');
+    el.removeAttribute('data-audit-hover');
   });
   document.querySelectorAll('.audit-active-highlight').forEach(function(el) {
     el.classList.remove('audit-active-highlight');
   });
+  if (window.__auditHoverPoll) {
+    document.removeEventListener('pointermove', window.__auditHoverPoll);
+    delete window.__auditHoverPoll;
+  }
+  delete window.__auditHoveredId;
 })()`;
 }
+
+function buildHoverIssueExpression(id: number | null): string {
+	return `(function(){
+  document.querySelectorAll('[data-audit-hover="1"]').forEach(function(el){
+    el.removeAttribute('data-audit-hover');
+  });
+  ${
+		id !== null
+			? `var t = document.querySelector('[data-audit-id="${id}"]');
+  if (t) t.setAttribute('data-audit-hover', '1');`
+			: ''
+	}
+})()`;
+}
+
+const HOVER_POLL_SCRIPT = `(function(){
+  if (window.__auditHoverPoll) return;
+  window.__auditHoveredId = null;
+  function onMove(e){
+    var t = e.target;
+    while (t && t !== document.body && t.nodeType === 1) {
+      var id = t.getAttribute && t.getAttribute('data-audit-id');
+      if (id !== null && id !== undefined) {
+        window.__auditHoveredId = parseInt(id, 10);
+        return;
+      }
+      t = t.parentElement;
+    }
+    window.__auditHoveredId = null;
+  }
+  window.__auditHoverPoll = onMove;
+  document.addEventListener('pointermove', onMove, { passive: true });
+})()`;
+
+const HOVER_POLL_READ_SCRIPT = `(function(){
+  return typeof window.__auditHoveredId === 'number' ? window.__auditHoveredId : null;
+})()`;
 
 function buildApplyTagsExpression(issues: AuditIssue[]): string {
 	const tagPayload = issues
@@ -183,9 +232,22 @@ function computePerCriterion(issues: AuditIssue[]): Partial<Record<WcagSC, Audit
 	return out;
 }
 
+export type AuditPhase = 'checks' | 'capture' | 'crop' | 'overlay';
+
+export interface AuditProgress {
+	phase: AuditPhase;
+	completed: number;
+	total: number;
+	message?: string;
+}
+
 export interface RunAuditOptions {
 	criteria?: WcagSC[];
 	sessionStore?: SessionStore;
+	signal?: AbortSignal;
+	onProgress?: (p: AuditProgress) => void;
+	/** Skip the full-page capture stage. Useful for tests. Defaults to false. */
+	skipCapture?: boolean;
 }
 
 export async function runAudit(opts: RunAuditOptions = {}): Promise<AuditResult> {
@@ -273,8 +335,73 @@ export async function runAudit(opts: RunAuditOptions = {}): Promise<AuditResult>
 	const summary = summarize(issues);
 	const perCriterion = computePerCriterion(issues);
 
+	let pageBounds = { width: 1280, height: 800 };
+
+	if (!opts.skipCapture) {
+		opts.onProgress?.({
+			phase: 'capture',
+			completed: 0,
+			total: 1,
+			message: 'Capturing full-page screenshot…'
+		});
+		const stitched = await capturePage({
+			signal: opts.signal,
+			onProgress: (chunk, total) => {
+				opts.onProgress?.({
+					phase: 'capture',
+					completed: chunk,
+					total,
+					message: `Capturing page ${chunk}/${total}…`
+				});
+			}
+		});
+
+		if (stitched) {
+			pageBounds = {
+				width: stitched.bounds.scrollWidth,
+				height: stitched.bounds.scrollHeight
+			};
+			const issuesWithRect = issues.filter((i) => i.rect);
+			for (let i = 0; i < issuesWithRect.length; i++) {
+				const issue = issuesWithRect[i];
+				if (!issue.rect) continue;
+				issue.thumb = cropToThumb(stitched, issue.rect, 96);
+				if (i % 8 === 0) {
+					opts.onProgress?.({
+						phase: 'crop',
+						completed: i + 1,
+						total: issuesWithRect.length,
+						message: `Cropping thumbnails ${i + 1}/${issuesWithRect.length}…`
+					});
+				}
+			}
+		} else {
+			// Capture failed but we still want a sensible viewBox for the minimap.
+			try {
+				const b = await getPageBounds();
+				pageBounds = { width: b.scrollWidth, height: b.scrollHeight };
+			} catch {
+				// fall through to default 1280×800
+			}
+		}
+	} else {
+		try {
+			const b = await getPageBounds();
+			pageBounds = { width: b.scrollWidth, height: b.scrollHeight };
+		} catch {
+			// keep default bounds
+		}
+	}
+
+	opts.onProgress?.({
+		phase: 'overlay',
+		completed: 1,
+		total: 1,
+		message: 'Tagging elements on the page…'
+	});
 	await evalInPage(buildInjectOverlayExpression());
 	await evalInPage(buildApplyTagsExpression(issues));
+	await evalInPage(HOVER_POLL_SCRIPT);
 
 	return {
 		issues,
@@ -282,12 +409,25 @@ export async function runAudit(opts: RunAuditOptions = {}): Promise<AuditResult>
 		perCriterion,
 		timestamp: new Date().toISOString(),
 		origin: info.origin,
-		url: info.url
+		url: info.url,
+		pageBounds
 	};
 }
 
 export async function highlightIssue(id: number | null): Promise<void> {
 	await evalInPage(buildHighlightExpression(id));
+}
+
+export async function hoverIssue(id: number | null): Promise<void> {
+	await evalInPage(buildHoverIssueExpression(id));
+}
+
+export async function pollHoveredAuditId(): Promise<number | null> {
+	try {
+		return await evalInPage<number | null>(HOVER_POLL_READ_SCRIPT);
+	} catch {
+		return null;
+	}
 }
 
 export async function clearAudit(): Promise<void> {
