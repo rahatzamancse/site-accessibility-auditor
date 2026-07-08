@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Grant Page Access — Site Accessibility Auditor</title>
+		<style>
+			:root {
+				color-scheme: light dark;
+			}
+			body {
+				margin: 0;
+				min-height: 100vh;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				font-family:
+					system-ui,
+					-apple-system,
+					sans-serif;
+				background: light-dark(#f5f7fa, #1e1f24);
+				color: light-dark(#1a1c20, #e8eaed);
+			}
+			.card {
+				max-width: 440px;
+				padding: 32px;
+				border-radius: 16px;
+				background: light-dark(#ffffff, #26282e);
+				box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
+				text-align: center;
+			}
+			.card img {
+				width: 64px;
+				height: 64px;
+			}
+			h1 {
+				font-size: 18px;
+				margin: 16px 0 8px;
+			}
+			p {
+				font-size: 13px;
+				line-height: 1.5;
+				color: light-dark(#5b6069, #a8adb6);
+				margin: 0 0 20px;
+			}
+			button {
+				font-size: 14px;
+				font-weight: 600;
+				padding: 10px 24px;
+				border: none;
+				border-radius: 8px;
+				background: #1a73e8;
+				color: #fff;
+				cursor: pointer;
+			}
+			button:hover {
+				background: #1765cc;
+			}
+			.status {
+				margin-top: 16px;
+				font-size: 13px;
+				min-height: 18px;
+			}
+			.status.granted {
+				color: #188038;
+			}
+			.status.denied {
+				color: #d93025;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="card">
+			<img src="../icons/icon-128.png" alt="" />
+			<h1>Allow screenshot capture</h1>
+			<p>
+				To capture screenshots of the page you are auditing (for thumbnails, state snapshots, and
+				chart analysis), the extension needs permission to access the pages you inspect. Audits that
+				don't need screenshots work without it.
+			</p>
+			<button id="grant">Allow access</button>
+			<div id="status" class="status"></div>
+		</div>
+		<script type="module" src="./grant-access.ts"></script>
+	</body>
+</html>

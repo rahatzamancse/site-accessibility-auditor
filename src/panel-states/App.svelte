@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { exploreStates } from '../lib/session/dynamic-explorer.ts';
+	import { ensurePageAccess } from '../lib/shared/page-access.ts';
 	import { computeStateDebt } from '../lib/session/state-debt.ts';
 	import type { ExplorerProgress, InteractionState, StateGraph } from '../lib/session/types.ts';
 	import PanelShell from '../lib/components/ui/panel-shell.svelte';
@@ -83,6 +84,9 @@
 		progress = null;
 		controller = new AbortController();
 		try {
+			// State screenshots use captureVisibleTab; run continues without
+			// them if the user declines the optional host permission.
+			await ensurePageAccess();
 			const result = await exploreStates({
 				budget,
 				maxDepth,

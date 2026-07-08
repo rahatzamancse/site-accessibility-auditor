@@ -2,14 +2,15 @@
 	"manifest_version": 3,
 	"name": "Site Accessibility Auditor",
 	"version": "1.0.0",
-	"description": "DevTools-based accessibility auditing for touch targets, keyboard flow, charts, and AI-assisted color and data-visualization analysis.",
+	"description": "DevTools accessibility auditing for touch targets, keyboard flow, charts, and AI-assisted color and data-visualization analysis.",
 	"devtools_page": "devtools/devtools.html",
 	"background": {
 		"service_worker": "background/service-worker.js",
 		"type": "module"
 	},
-	"permissions": ["storage", "tabs", "activeTab", "scripting"],
-	"host_permissions": ["https://api.openai.com/*", "<all_urls>"],
+	"permissions": ["storage", "tabs"],
+	"host_permissions": ["https://api.openai.com/*"],
+	"optional_host_permissions": ["<all_urls>"],
 	"icons": {
 		"16": "icons/icon-16.png",
 		"48": "icons/icon-48.png",

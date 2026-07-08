@@ -18,6 +18,7 @@
 	import { getRuns, saveRun, deleteRun, type AuditRunRecord } from '../lib/shared/audit-history.ts';
 	import { diffAudits } from '../lib/shared/audit-diff.ts';
 	import { captureTab, downscaleDataUrl } from '../lib/shared/devtools-eval.ts';
+	import { ensurePageAccess } from '../lib/shared/page-access.ts';
 	import PanelShell from '../lib/components/ui/panel-shell.svelte';
 	import ToolbarButton from '../lib/components/ui/toolbar-button.svelte';
 	import EmptyState from '../lib/components/ui/empty-state.svelte';
@@ -77,17 +78,21 @@
 		stopHoverPoll();
 		try {
 			const criteria = ALL_CRITERIA.filter((c) => enabled[c]);
+			const canCapture = await ensurePageAccess();
 			const auditResult = await runAudit({
 				criteria,
+				skipCapture: !canCapture,
 				onProgress: (p) => (progress = p)
 			});
 			result = auditResult;
 			let thumbnail: string | null = null;
-			try {
-				const raw = await captureTab();
-				if (raw) thumbnail = await downscaleDataUrl(raw, 320);
-			} catch {
-				thumbnail = null;
+			if (canCapture) {
+				try {
+					const raw = await captureTab();
+					if (raw) thumbnail = await downscaleDataUrl(raw, 320);
+				} catch {
+					thumbnail = null;
+				}
 			}
 			const record = await saveRun(auditResult, thumbnail);
 			runs = await getRuns(auditResult.origin);

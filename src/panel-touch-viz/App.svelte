@@ -9,6 +9,7 @@
 		type AnalyzeAllProgress
 	} from '../lib/data-viz/chart-pipeline.ts';
 	import { highlightChart } from '../lib/data-viz/chart-extractor.ts';
+	import { ensurePageAccess } from '../lib/shared/page-access.ts';
 	import type { ChartScanResult, DetectedChart } from '../lib/data-viz/types.ts';
 	import ChartList from '../lib/components/data-viz/chart-list.svelte';
 	import PanelShell from '../lib/components/ui/panel-shell.svelte';
@@ -61,6 +62,9 @@
 		error = null;
 		progress = { completed: 0, total: result.charts.length };
 		try {
+			// Screenshot fallback for chart capture needs the optional host
+			// permission; SVG/IMG captures still work if the user declines.
+			await ensurePageAccess();
 			await analyzeAll(apiKey, result.charts, (p: AnalyzeAllProgress) => {
 				progress = { completed: p.completed, total: p.total };
 				result = { ...result! };
@@ -78,6 +82,7 @@
 		const chart = result.charts.find((c) => c.id === id);
 		if (!chart) return;
 		error = null;
+		await ensurePageAccess();
 		await analyzeChart(apiKey, chart);
 		result = { ...result };
 	}
@@ -174,7 +179,10 @@
 		{/if}
 
 		{#if scanning}
-			<LoadingSkeleton rows={3} label="Scanning for charts across SVG, canvas, image, iframes, and shadow DOM…" />
+			<LoadingSkeleton
+				rows={3}
+				label="Scanning for charts across SVG, canvas, image, iframes, and shadow DOM…"
+			/>
 		{:else if result}
 			<ChartList
 				charts={result.charts}
